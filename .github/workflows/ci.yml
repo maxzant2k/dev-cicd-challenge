@@ -5,17 +5,24 @@ on:
     branches: [main, develop]
   pull_request:
     branches: [main, develop]
+  workflow_dispatch:
+    inputs:
+      simulate_production_failure:
+        description: "Force production health-check failure to demo rollback"
+        required: false
+        default: "false"
 
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  APP_ENV: ci
 
 jobs:
-  # ==================== UNIT TESTS ====================
-  test:
-    name: Run Tests
+  test-and-analyze:
+    name: Test + AI Incident Analysis
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -27,78 +34,63 @@ jobs:
           cache: "npm"
 
       - name: Install dependencies
-        run: npm install
+        run: npm ci
 
-      - name: Run tests
-        run: npm test
+      - name: Run tests and capture logs
+        id: tests
+        continue-on-error: true
         env:
           APP_ENV: test
+        run: |
+          mkdir -p artifacts
+          set -o pipefail
+          npm test 2>&1 | tee artifacts/pipeline_failure.log
 
-      - name: Upload coverage
+      - name: Generate AI incident report on failure
+        if: steps.tests.outcome == 'failure'
+        run: node scripts/ai-resolver.js artifacts/pipeline_failure.log
+
+      - name: Upload test and incident artifacts
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
-          path: coverage/
-          retention-days: 5
-
-  # ==================== AI INCIDENT RESOLVER ====================
-  ai-incident-resolver:
-    name: AI Incident Analyzer
-    needs: test
-    if: failure()
-    runs-on: ubuntu-latest
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Install dependencies
-        run: npm install
-
-      - name: Generate AI Incident Report
-        run: node scripts/ai-resolver.js logs/pipeline_failure.log
-        continue-on-error: true
-
-      - name: Upload Incident Report
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: incident-report
-          path: artifacts/incident_report.md
+          name: test-and-incident-artifacts
+          path: artifacts/
           retention-days: 10
 
-      - name: Comment PR with Incident Report
-        if: github.event_name == 'pull_request' && failure()
+      - name: Comment PR with incident report
+        if: github.event_name == 'pull_request' && steps.tests.outcome == 'failure'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
             const path = require('path');
             const reportPath = path.join('artifacts', 'incident_report.md');
-            if (fs.existsSync(reportPath)) {
-              const report = fs.readFileSync(reportPath, 'utf8');
-              github.rest.issues.createComment({
-                issue_number: context.issue.number,
-                owner: context.repo.owner,
-                repo: context.repo.repo,
-                body: `## 🚨 AI Incident Report\n\n${report}`
-              });
+            if (!fs.existsSync(reportPath)) {
+              core.info('incident_report.md not found, skipping comment');
+              return;
             }
 
-  # ==================== BUILD & ARTIFACT ====================
-  build:
-    name: Build Application
-    needs: test
-    runs-on: ubuntu-latest
+            const report = fs.readFileSync(reportPath, 'utf8');
+            await github.rest.issues.createComment({
+              issue_number: context.issue.number,
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              body: `## AI Incident Report\n\n${report}`
+            });
+
+      - name: Fail workflow if tests failed
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
+
+  build-image:
+    name: Build Docker Image
+    needs: test-and-analyze
     if: success()
-    outputs:
-      image: ${{ steps.meta.outputs.image }}
-      tags: ${{ steps.meta.outputs.tags }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -106,7 +98,7 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Log in to Container Registry
+      - name: Log in to GHCR
         if: github.event_name == 'push'
         uses: docker/login-action@v3
         with:
@@ -114,143 +106,145 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract metadata
-        id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=ref,event=branch
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha
+      - name: Build image (always)
+        run: docker build -t app:${{ github.sha }} .
 
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v5
-        with:
-          context: .
-          push: ${{ github.event_name == 'push' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+      - name: Push image to GHCR (push only)
+        if: github.event_name == 'push'
+        run: |
+          docker tag app:${{ github.sha }} ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
+          docker push ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ github.sha }}
 
-      - name: Generate artifacts
+  deploy-staging:
+    name: Deploy + Smoke Test (Staging Simulation)
+    needs: build-image
+    if: github.event_name == 'push'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Build staging image
+        run: docker build -t app-staging:${{ github.sha }} .
+
+      - name: Start staging container
+        run: |
+          docker run -d --name staging-app -p 3001:3001 -e APP_ENV=staging app-staging:${{ github.sha }}
+
+      - name: Smoke test staging /health
+        run: |
+          curl --retry 12 --retry-all-errors --retry-delay 2 --fail http://localhost:3001/health
+
+      - name: Capture staging logs on failure
+        if: failure()
         run: |
           mkdir -p artifacts
-          echo "Build completed at $(date -u +'%Y-%m-%dT%H:%M:%SZ')" > artifacts/build-info.txt
-          echo "Commit: ${{ github.sha }}" >> artifacts/build-info.txt
-          echo "Branch: ${{ github.ref }}" >> artifacts/build-info.txt
+          docker logs staging-app > artifacts/staging_failure.log || true
 
-      - name: Upload build artifacts
+      - name: Upload staging artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: build-artifacts
+          name: staging-artifacts
           path: artifacts/
-          retention-days: 30
+          retention-days: 10
 
-  # ==================== SMOKE TESTS (Staging) ====================
-  smoke-test:
-    name: Smoke Tests
-    needs: build
-    runs-on: ubuntu-latest
-    if: github.event_name == 'push'
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - name: Stop staging container
+        if: always()
+        run: docker rm -f staging-app || true
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-
-      - name: Wait for app to be ready
-        run: sleep 5
-
-      - name: Test Health Endpoint
-        run: |
-          curl -f http://localhost:3001/health || exit 1
-        continue-on-error: true
-
-      - name: Log smoke test result
-        if: failure()
-        run: echo "::error::Smoke test failed on health endpoint"
-
-  # ==================== DEPLOYMENT TO STAGING ====================
-  deploy-staging:
-    name: Deploy to Staging
-    needs: [build, smoke-test]
-    runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/develop' && github.event_name == 'push'
-    environment:
-      name: staging
-      url: ${{ steps.deploy.outputs.url }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Deploy to staging
-        id: deploy
-        run: |
-          echo "::notice::Staging deployment would happen here"
-          echo "url=https://staging-demo.example.com" >> $GITHUB_OUTPUT
-        env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
-          STAGING_HOST: ${{ secrets.STAGING_HOST }}
-
-      - name: Verify staging deployment
-        run: |
-          echo "Verifying staging deployment..."
-          echo "In production, this would check: curl https://staging-demo.example.com/health"
-
-  # ==================== DEPLOYMENT TO PRODUCTION ====================
   deploy-production:
-    name: Deploy to Production
-    needs: [build]
+    name: Deploy to Render + Health Check + Rollback
+    needs: deploy-staging
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
-    if: github.ref == 'refs/heads/main' && github.event_name == 'push'
-    environment:
-      name: production
-      url: ${{ steps.deploy.outputs.url }}
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Deploy to production
-        id: deploy
+      - name: Trigger Render deploy
+        id: trigger
         run: |
-          echo "::notice::Production deployment would happen here"
-          echo "url=https://api.example.com" >> $GITHUB_OUTPUT
-        env:
-          DEPLOY_KEY: ${{ secrets.PROD_DEPLOY_KEY }}
-          PROD_HOST: ${{ secrets.PROD_HOST }}
+          RESPONSE=$(curl -sf -X POST \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{}')
+          DEPLOY_ID=$(echo "$RESPONSE" | jq -r '.id')
+          echo "deploy_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          echo "Triggered Render deploy: $DEPLOY_ID"
 
-      - name: Health check
-        id: health
+      - name: Wait for Render deploy to go live
+        id: wait-deploy
+        continue-on-error: true
         run: |
-          echo "Checking production health..."
-          echo "In production: curl https://api.example.com/health"
-          exit 0
+          for i in $(seq 1 30); do
+            STATUS=$(curl -sf \
+              "https://api.render.com/v1/deploys/${{ steps.trigger.outputs.deploy_id }}" \
+              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              | jq -r '.status')
+            echo "[$i/30] deploy status: $STATUS"
+            [[ "$STATUS" == "live" ]] && exit 0
+            [[ "$STATUS" =~ ^(build_failed|update_failed|canceled|pre_deploy_failed)$ ]] && { echo "Deploy failed: $STATUS"; exit 1; }
+            sleep 10
+          done
+          echo "Timeout: deploy did not go live within 5 minutes"
+          exit 1
 
-      - name: Rollback on failure
-        if: failure()
+      - name: Health check production /health (Render)
+        id: prod-health
+        continue-on-error: true
         run: |
-          echo "::error::Production health check failed, initiating rollback"
-          echo "Rolling back to previous version..."
+          if [[ "${{ github.event.inputs.simulate_production_failure || 'false' }}" == "true" ]]; then
+            echo "Simulating production failure for rollback demo"
+            exit 1
+          fi
+          curl --retry 6 --retry-all-errors --retry-delay 10 --fail \
+            "${{ secrets.RENDER_APP_URL }}/health"
 
-  # ==================== SUMMARY ====================
+      - name: Rollback to previous Render deploy on failure
+        if: steps.prod-health.outcome == 'failure' || steps.wait-deploy.outcome == 'failure'
+        run: |
+          mkdir -p artifacts
+
+          PREV_DEPLOY=$(curl -sf \
+            "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys?limit=10" \
+            -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+            | jq -r '[.[] | select(.status == "live")] | .[1].id // empty')
+
+          if [[ -n "$PREV_DEPLOY" ]]; then
+            echo "Rolling back to previous deploy: $PREV_DEPLOY"
+            curl -sf -X POST \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/$PREV_DEPLOY/rollback" \
+              -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+              -H "Content-Type: application/json" || true
+            echo "Rollback initiated: $PREV_DEPLOY" | tee artifacts/rollback_status.txt
+          else
+            echo "No previous live deploy available for rollback" | tee artifacts/rollback_status.txt
+          fi
+
+      - name: Upload production artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: production-artifacts
+          path: artifacts/
+          retention-days: 10
+
+      - name: Fail job if deploy or health check failed
+        if: steps.prod-health.outcome == 'failure' || steps.wait-deploy.outcome == 'failure'
+        run: exit 1
+
   summary:
     name: Pipeline Summary
     runs-on: ubuntu-latest
-    needs: [test, build]
     if: always()
+    needs: [test-and-analyze, build-image, deploy-staging, deploy-production]
     steps:
-      - name: Pipeline Status
+      - name: Print summary
         run: |
           echo "Pipeline Status Summary"
           echo "======================="
-          echo "Test Status: ${{ needs.test.result }}"
-          echo "Build Status: ${{ needs.build.result }}"
+          echo "Test: ${{ needs.test-and-analyze.result }}"
+          echo "Build: ${{ needs.build-image.result }}"
+          echo "Staging: ${{ needs.deploy-staging.result }}"
+          echo "Production: ${{ needs.deploy-production.result }}"
           echo "Commit: ${{ github.sha }}"
           echo "Branch: ${{ github.ref }}"
-          echo "Author: ${{ github.actor }}"
