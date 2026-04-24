@@ -161,6 +161,7 @@ jobs:
     steps:
       - name: Trigger Render deploy
         id: trigger
+        if: github.event_name == 'workflow_dispatch'
         run: |
           RESPONSE=$(curl -sf -X POST \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
@@ -168,9 +169,38 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{}')
-          DEPLOY_ID=$(echo "$RESPONSE" | jq -r '.id')
-          echo "deploy_id=$DEPLOY_ID" >> $GITHUB_OUTPUT
+          DEPLOY_ID=$(echo "$RESPONSE" | jq -r '.id // empty')
+          echo "deploy_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
           echo "Triggered Render deploy: $DEPLOY_ID"
+
+      - name: Resolve target Render deploy
+        id: resolve-deploy
+        run: |
+          for i in $(seq 1 30); do
+            DEPLOY_ID=""
+
+            if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ steps.trigger.outputs.deploy_id }}" ]]; then
+              DEPLOY_ID="${{ steps.trigger.outputs.deploy_id }}"
+            else
+              DEPLOY_ID=$(curl -sf \
+                "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys?limit=20" \
+                -H "Accept: application/json" \
+                -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
+                | jq -r --arg sha "${{ github.sha }}" '([.[].deploy | select((.commit.id // "") == $sha)][0].id) // (.[0].deploy.id) // empty')
+            fi
+
+            if [[ -n "$DEPLOY_ID" ]]; then
+              echo "deploy_id=$DEPLOY_ID" >> "$GITHUB_OUTPUT"
+              echo "Using Render deploy: $DEPLOY_ID"
+              exit 0
+            fi
+
+            echo "[$i/30] waiting for Render deploy id"
+            sleep 10
+          done
+
+          echo "Could not resolve a Render deploy id"
+          exit 1
 
       - name: Wait for Render deploy to go live
         id: wait-deploy
@@ -178,10 +208,10 @@ jobs:
         run: |
           for i in $(seq 1 60); do
             STATUS=$(curl -sf \
-              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/${{ steps.trigger.outputs.deploy_id }}" \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/${{ steps.resolve-deploy.outputs.deploy_id }}" \
               -H "Accept: application/json" \
               -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-              | jq -r '.status')
+              | jq -r '.status // empty')
             echo "[$i/60] deploy status: $STATUS"
             [[ "$STATUS" == "live" ]] && exit 0
             [[ "$STATUS" =~ ^(build_failed|update_failed|canceled|pre_deploy_failed)$ ]] && { echo "Deploy failed: $STATUS"; exit 1; }
@@ -202,7 +232,7 @@ jobs:
             "${{ secrets.RENDER_APP_URL }}/health"
 
       - name: Rollback to previous Render deploy on failure
-        if: steps.prod-health.outcome == 'failure' || steps.wait-deploy.outcome == 'failure'
+        if: steps.resolve-deploy.outcome == 'failure' || steps.prod-health.outcome == 'failure' || steps.wait-deploy.outcome == 'failure'
         run: |
           mkdir -p artifacts
 
@@ -235,7 +265,7 @@ jobs:
           retention-days: 10
 
       - name: Fail job if deploy or health check failed
-        if: steps.prod-health.outcome == 'failure' || steps.wait-deploy.outcome == 'failure'
+        if: steps.resolve-deploy.outcome == 'failure' || steps.prod-health.outcome == 'failure' || steps.wait-deploy.outcome == 'failure'
         run: exit 1
 
   summary:
