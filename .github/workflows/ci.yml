@@ -176,18 +176,18 @@ jobs:
         id: wait-deploy
         continue-on-error: true
         run: |
-          for i in $(seq 1 30); do
+          for i in $(seq 1 60); do
             STATUS=$(curl -sf \
               "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/${{ steps.trigger.outputs.deploy_id }}" \
               -H "Accept: application/json" \
               -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
               | jq -r '.status')
-            echo "[$i/30] deploy status: $STATUS"
+            echo "[$i/60] deploy status: $STATUS"
             [[ "$STATUS" == "live" ]] && exit 0
             [[ "$STATUS" =~ ^(build_failed|update_failed|canceled|pre_deploy_failed)$ ]] && { echo "Deploy failed: $STATUS"; exit 1; }
             sleep 10
           done
-          echo "Timeout: deploy did not go live within 5 minutes"
+          echo "Timeout: deploy did not go live within 10 minutes"
           exit 1
 
       - name: Health check production /health (Render)
