@@ -226,9 +226,9 @@ find . -type f -name "*.js" -o -name "*.json" -o -name "*.md" -o -name "*yml" | 
 # package.json  ✓
 # Dockerfile  ✓
 # README.md  ✓
-# DEPLOYMENT.md  ✓
-# TECHNICAL_DECISIONS.md  ✓
-# VERIFICATION.md  ✓
+# docs/deployment.md  ✓
+# docs/technical-decisions.md  ✓
+# docs/verification.md  ✓
 ```
 
 ---
@@ -396,7 +396,7 @@ ls -la artifacts/
 
 ## ✨ Final Checklist
 
-Before submitting/presenting:
+Before considering the work ready:
 
 - [ ] `npm test` passes (2/2)
 - [ ] `npm run dev` starts server
@@ -425,10 +425,10 @@ Before submitting/presenting:
    - Watch workflow run
    - Verify all jobs pass
 
-3. **Prepare Presentation**
-   - Open TECHNICAL_DECISIONS.md
-   - Open README.md for architecture
-   - Have DEPLOYMENT.md ready for Q&A
+3. **Review documentation**
+   - Open docs/technical-decisions.md
+   - Open README.md for the original challenge statement
+   - Open docs/deployment.md for deployment details
 
 ---
 

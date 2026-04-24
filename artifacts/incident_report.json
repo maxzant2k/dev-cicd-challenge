@@ -1,0 +1,27 @@
+{
+  "timestamp": "2026-04-24T17:23:02.911Z",
+  "analysis": {
+    "stepFailed": "Unit Tests",
+    "probableRootCause": [
+      "Server error - application returned HTTP 500",
+      "Likely cause: missing APP_ENV environment variable"
+    ],
+    "suggestedFixes": [
+      "Ensure APP_ENV is set in test/runtime environment"
+    ],
+    "severity": "medium",
+    "confidence": "high",
+    "rollbackRequired": false,
+    "commonErrors": [
+      "Status code mismatch: expected 200, got 500"
+    ],
+    "detailedAnalysis": ""
+  },
+  "recommendations": {
+    "immediate_actions": [
+      "Ensure APP_ENV is set in test/runtime environment"
+    ],
+    "rollback_required": false,
+    "estimated_resolution_time": "Low (< 5 min)"
+  }
+}

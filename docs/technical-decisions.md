@@ -1,6 +1,6 @@
 # Decisiones Técnicas - Guía Detallada
 
-Este documento explica el razonamiento detrás de cada decisión técnica importante en el proyecto. **Úsalo como machete en la presentación.**
+Este documento explica el razonamiento detrás de cada decisión técnica importante en el proyecto.
 
 ---
 
@@ -50,7 +50,7 @@ it('should return 500 when APP_ENV is not set', async () => {
 3. **Defensivo**: El 2do test valida que la app es robusta sin env vars
 4. **Mantenible**: Si alguien olvida setear APP_ENV, los tests lo atraparán
 
-### Contraargumento (posible pregunta en entrevista)
+### Contraargumento habitual
 **P:** "¿No sería mejor hacer APP_ENV opcional?"
 **R:** "No, porque queremos fail-fast. Un servicio sin configuración es peligroso. Es mejor que explote visiblemente que silenciosamente degradarse."
 
@@ -533,7 +533,7 @@ describe('Performance', () => {
 
 ---
 
-## Preguntas Frecuentes en Entrevista
+## Preguntas Frecuentes
 
 ### P1: "¿Por qué no usas TypeScript?"
 **R:** "Por simplicidad. Para un challenge MVP, JavaScript puro es suficiente. TypeScript agregría 15% complexity sin beneficio significant aquí."
