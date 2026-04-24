@@ -164,6 +164,7 @@ jobs:
         run: |
           RESPONSE=$(curl -sf -X POST \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys" \
+            -H "Accept: application/json" \
             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
             -H "Content-Type: application/json" \
             -d '{}')
@@ -177,7 +178,8 @@ jobs:
         run: |
           for i in $(seq 1 30); do
             STATUS=$(curl -sf \
-              "https://api.render.com/v1/deploys/${{ steps.trigger.outputs.deploy_id }}" \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/${{ steps.trigger.outputs.deploy_id }}" \
+              -H "Accept: application/json" \
               -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
               | jq -r '.status')
             echo "[$i/30] deploy status: $STATUS"
@@ -206,15 +208,19 @@ jobs:
 
           PREV_DEPLOY=$(curl -sf \
             "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys?limit=10" \
+            -H "Accept: application/json" \
             -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-            | jq -r '[.[] | select(.status == "live")] | .[1].id // empty')
+            | jq -r '[.[].deploy | select(.status == "live")] | .[1].id // empty')
 
           if [[ -n "$PREV_DEPLOY" ]]; then
             echo "Rolling back to previous deploy: $PREV_DEPLOY"
+            ROLLBACK_PAYLOAD=$(jq -n --arg deployId "$PREV_DEPLOY" '{deployId: $deployId}')
             curl -sf -X POST \
-              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/deploys/$PREV_DEPLOY/rollback" \
+              "https://api.render.com/v1/services/${{ secrets.RENDER_SERVICE_ID }}/rollback" \
+              -H "Accept: application/json" \
               -H "Authorization: Bearer ${{ secrets.RENDER_API_KEY }}" \
-              -H "Content-Type: application/json" || true
+              -H "Content-Type: application/json" \
+              -d "$ROLLBACK_PAYLOAD" || true
             echo "Rollback initiated: $PREV_DEPLOY" | tee artifacts/rollback_status.txt
           else
             echo "No previous live deploy available for rollback" | tee artifacts/rollback_status.txt
