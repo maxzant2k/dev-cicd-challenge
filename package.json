@@ -5,8 +5,25 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "test": "jest --runInBand"
+    "test": "jest --runInBand",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "analyze-logs": "node scripts/ai-resolver.js logs/pipeline_failure.log",
+    "lint": "echo 'Add eslint for linting'",
+    "dev": "APP_ENV=development node server.js",
+    "docker:build": "docker build -t dev-cicd-challenge:latest .",
+    "docker:run": "docker run -p 3001:3001 -e APP_ENV=production dev-cicd-challenge:latest"
   },
+  "keywords": [
+    "ci-cd",
+    "devops",
+    "incident-resolution",
+    "ai",
+    "github-actions",
+    "docker"
+  ],
+  "author": "",
+  "license": "MIT",
   "dependencies": {
     "express": "^4.21.2"
   },
