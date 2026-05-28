@@ -153,10 +153,58 @@ jobs:
         if: always()
         run: docker rm -f staging-app || true
 
+  verify-pre-prod:
+    name: AI Pre-Deploy Verification (Gate)
+    needs: build-image
+    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run AI resolver in verify mode (pre-prod gate)
+        id: verify
+        env:
+          APP_ENV: test
+        run: node scripts/ai-resolver.js verify
+
+      - name: Append verification report to job summary
+        if: always()
+        run: |
+          if [[ -f artifacts/pre_deploy_verification.md ]]; then
+            cat artifacts/pre_deploy_verification.md >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Upload pre-deploy verification artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pre-deploy-verification
+          path: |
+            artifacts/pre_deploy_verification.md
+            artifacts/pre_deploy_verification.json
+          retention-days: 10
+
   deploy-production:
     name: Deploy to Render + Health Check + Rollback
-    needs: deploy-staging
-    if: (github.ref == 'refs/heads/main' && github.event_name == 'push') || github.event_name == 'workflow_dispatch'
+    needs: [deploy-staging, verify-pre-prod]
+    if: |
+      always() && needs.verify-pre-prod.result == 'success' && (
+        (github.ref == 'refs/heads/main' && github.event_name == 'push' && needs.deploy-staging.result == 'success')
+        || github.event_name == 'workflow_dispatch'
+      )
     runs-on: ubuntu-latest
     steps:
       - name: Trigger Render deploy
@@ -272,15 +320,16 @@ jobs:
     name: Pipeline Summary
     runs-on: ubuntu-latest
     if: always()
-    needs: [test-and-analyze, build-image, deploy-staging, deploy-production]
+    needs: [test-and-analyze, build-image, deploy-staging, verify-pre-prod, deploy-production]
     steps:
       - name: Print summary
         run: |
           echo "Pipeline Status Summary"
           echo "======================="
-          echo "Test: ${{ needs.test-and-analyze.result }}"
-          echo "Build: ${{ needs.build-image.result }}"
-          echo "Staging: ${{ needs.deploy-staging.result }}"
-          echo "Production: ${{ needs.deploy-production.result }}"
-          echo "Commit: ${{ github.sha }}"
-          echo "Branch: ${{ github.ref }}"
+          echo "Test:             ${{ needs.test-and-analyze.result }}"
+          echo "Build:            ${{ needs.build-image.result }}"
+          echo "Staging:          ${{ needs.deploy-staging.result }}"
+          echo "Pre-Prod Verify:  ${{ needs.verify-pre-prod.result }}"
+          echo "Production:       ${{ needs.deploy-production.result }}"
+          echo "Commit:           ${{ github.sha }}"
+          echo "Branch:           ${{ github.ref }}"
